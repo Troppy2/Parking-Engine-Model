@@ -1,0 +1,56 @@
+[
+    {
+        "label": "requests",
+        "kind": 6,
+        "isExtraImport": true,
+        "importPath": "requests",
+        "description": "requests",
+        "detail": "requests",
+        "documentation": {}
+    },
+    {
+        "label": "numpy",
+        "kind": 6,
+        "isExtraImport": true,
+        "importPath": "numpy",
+        "description": "numpy",
+        "detail": "numpy",
+        "documentation": {}
+    },
+    {
+        "label": "pandas",
+        "kind": 6,
+        "isExtraImport": true,
+        "importPath": "pandas",
+        "description": "pandas",
+        "detail": "pandas",
+        "documentation": {}
+    },
+    {
+        "label": "get_parking_data",
+        "kind": 2,
+        "importPath": "recommendation_engine",
+        "description": "recommendation_engine",
+        "peekOfCode": "def get_parking_data():\n    pass\ndef get_weather_data():\n    pass\ndef get_traffic_conditions():\n    pass",
+        "detail": "recommendation_engine",
+        "documentation": {}
+    },
+    {
+        "label": "get_weather_data",
+        "kind": 2,
+        "importPath": "recommendation_engine",
+        "description": "recommendation_engine",
+        "peekOfCode": "def get_weather_data():\n    pass\ndef get_traffic_conditions():\n    pass",
+        "detail": "recommendation_engine",
+        "documentation": {}
+    },
+    {
+        "label": "get_traffic_conditions",
+        "kind": 2,
+        "importPath": "recommendation_engine",
+        "description": "recommendation_engine",
+        "peekOfCode": "def get_traffic_conditions():\n    pass",
+        "detail": "recommendation_engine",
+        "documentation": {}
+    }
+]
