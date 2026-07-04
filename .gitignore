@@ -1,2 +1,7 @@
 # Docs
 doc/
+
+.vscode/
+
+*.parquet
+*.txt
