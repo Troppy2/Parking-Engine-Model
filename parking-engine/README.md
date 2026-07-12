@@ -70,8 +70,9 @@ Sourced from the `campus_events` table (already synced via iCal).
 ### Traffic Context
 Sourced from a live traffic-flow provider (HERE), cached in Redis every 2–5 minutes. At rank time the
 engine reads **areal flow tiles** around each spot — one cheap lookup per spot cluster, *not* a
-point-to-point routing call per spot. Full point-to-point routing is reserved for the single spot the
-user actually selects (see **Re-routing** below).
+point-to-point routing call per spot. These signals exist only to **improve the recommendation** (a
+spot behind gridlock ranks lower); the drive itself — routing, closures, live rerouting — is handed
+off to Google Maps (see **Navigation Hand-off** below), so the engine never computes a route.
 
 | Feature | Description |
 |---|---|
@@ -123,37 +124,27 @@ Each synthetic row has realistic noise so the model does not overfit to clean pa
 
 ---
 
-## Re-routing (Drive-Time)
+## Navigation Hand-off
 
-Traffic does two separate jobs, and they are **deliberately kept apart**:
+The engine's job ends at the **decision** — *which spot*. The drive itself is delegated to **Google
+Maps** via a deep link. This is a deliberate scoping choice:
 
-- **Job A — ranking (the ML model).** Live traffic enters the ranker only as the `live_congestion`
-  and `traffic_delay_minutes` features above. There is *no* hard threshold in the model — the ranker
-  learns how much traffic matters per user and context.
-- **Job B — re-routing (deterministic).** Once a user selects a spot and starts in-app turn-by-turn
-  navigation, a background monitor watches whether a materially better route has opened up. This is
-  plain routing logic, not ML.
+- **Don't reimplement Google.** Live traffic routing, construction/closure avoidance, and off-course
+  rerouting are exactly what Google Maps does with a decade-plus head start. A student far enough out
+  to care about rerouting is opening Google Maps anyway. Competing there is a losing battle.
+- **It deletes a maintenance class we don't want.** No MnDOT ingestion, no "is this closure still
+  active?" validation, no construction cache — Google owns all of it, always fresh.
 
-**Why not an absolute minute threshold.** "Avoid routes over 20–30 min" punishes long-commute users
-for geography, not congestion. An 8-minute commuter and a 25-minute commuter need different rules.
-So the decision is **relative, with an absolute floor**:
+On spot selection the app opens a Google Maps directions URL to the spot (ideally the lot's *entrance*
+coordinate). Google produces a route that already accounts for live traffic and closures and reroutes
+the user if they go off course. Park & Go contributes the *choice*; Google executes the *drive*.
 
-> Offer a reroute only when the best alternative saves **more than `max(5 min, 20%)`** of the current
-> live ETA, **and** the alternative stays ahead for **2 consecutive checks** (debounce, so jittering
-> live ETAs don't cause the prompt to flip-flop).
+**Where the traffic features fit:** `live_congestion` / `traffic_delay_minutes` stay, but only to
+*rank* spots — they make a congested spot a worse recommendation. They do **not** drive routing.
 
-The `5 min` / `20%` / `2 checks` values are tunable defaults, to be calibrated once real drive data
-accumulates — not fixed constants.
-
-**Drive-time loop:**
-
-1. On spot selection, make the one expensive point-to-point routing call and start navigation.
-2. Every 60–120s, compare the current route's live ETA against the best alternative.
-3. When the relative+floor rule fires and holds for 2 checks, surface a **non-blocking yes/no prompt**:
-   *"Faster route, saves ~9 min. Switch?"* Never auto-switch — the user may know a shortcut or have a
-   planned stop.
-4. **Log the yes/no.** An explicit confirmation is a far stronger signal than an implicit click; it
-   both validates the traffic features and feeds the user-feedback training signal.
+> **If you ever outgrow the hand-off:** the natural next step is *last-mile* guidance to the exact lot
+> entrance Google doesn't know is the target — an additive, deterministic feature, deliberately out of
+> scope now.
 
 ---
 
@@ -164,10 +155,10 @@ accumulates — not fixed constants.
 
 - `context/weather.py` — OpenWeatherMap `/weather` endpoint, maps OWM condition codes to severity buckets, caches result in Redis with 15-min TTL
 - `context/events.py` — Queries `campus_events` table for currently active events, computes distance from each spot, checks overlap with user commute corridor
-- `context/traffic.py` — HERE traffic-flow tiles around each spot, returns `live_congestion` + `traffic_delay_minutes`, caches result in Redis with 2–5 min TTL, fail-soft to a clear-roads default
-- APScheduler job in `task/` triggers weather refresh every 15 minutes
+- `context/traffic.py` — HERE traffic-flow tiles around each spot, returns `live_congestion` + `traffic_delay_minutes` (ranking signals only), caches result in Redis with 2–5 min TTL, fail-soft to a clear-roads default
+- APScheduler job in `task/` refreshes weather every 15 minutes
 
-**Deliverable:** `get_weather_context(lat, lon)`, `get_event_context(spot, user_origin)`, and `get_traffic_context(spot)` functions ready to use.
+**Deliverable:** `get_weather_context(lat, lon)`, `get_event_context(spot, user_origin)`, and `get_traffic_context(spot)` ready to use.
 
 ### Phase 2 — Synthetic Training Data
 **Goal:** Enough labeled data to train the initial ranker.
@@ -196,15 +187,16 @@ accumulates — not fixed constants.
 
 **Deliverable:** ML-powered recommendations in the live app, heuristic still available as fallback.
 
-### Phase 5 — Drive-Time Re-routing
-**Goal:** Once a user is navigating to a chosen spot, offer a faster route when one materially opens up.
+### Phase 5 — Navigation Hand-off
+**Goal:** Get the user driving to the chosen spot with a traffic- and closure-aware route — by handing
+off to Google Maps, not by building routing ourselves.
 
-- `context/traffic.py` — reused for the one point-to-point routing call on the selected spot
-- `reroute.py` — pure decision function `should_reroute(current_eta, alt_eta, history)` implementing the relative+floor rule (`max(5 min, 20%)`) plus the 2-check debounce; kept **out** of the ranker
-- Background monitor (APScheduler / task) polls current vs. alternative ETA every 60–120s during nav
-- Surfaces a non-blocking yes/no prompt; logs the confirmation as an explicit feedback signal
+- `engine.py` (or a small helper) — `navigation_url(spot)` builds a Google Maps directions deep link to the spot's entrance coordinate
+- Google Maps owns the route, live traffic, construction/closure avoidance, and off-course rerouting
+- No MnDOT ingestion, no closure cache, no routing/rerouting logic in the app
 
-**Deliverable:** in-app navigation offers debounced, user-confirmed reroutes; every yes/no is logged for future training.
+**Deliverable:** selecting a recommended spot opens Google Maps to that spot's entrance with driving
+directions; the app ships zero routing logic of its own.
 
 ---
 
@@ -215,7 +207,7 @@ parking-engine/
 ├── context/
 │   ├── weather.py           # OpenWeatherMap client + severity mapping
 │   ├── events.py            # Event proximity + commute overlap
-│   └── traffic.py           # HERE flow tiles + point-to-point routing
+│   └── traffic.py           # HERE flow tiles (ranking signal only)
 ├── data/
 │   ├── synthetic_generator.py  # Generates training_data.parquet
 │   └── feature_store.py        # Builds feature vectors for model input
@@ -224,8 +216,7 @@ parking-engine/
 │   └── trained/             # Serialized model artifacts (.txt)
 ├── training/
 │   └── train.py             # Training pipeline
-├── reroute.py               # Drive-time reroute decision (relative+floor + debounce)
-└── engine.py                # Public interface
+└── engine.py                # Public interface + Google Maps navigation deep link
 ```
 
 ---
@@ -238,7 +229,8 @@ parking-engine/
 | `pandas` | Feature matrix assembly |
 | `numpy` | Numerical ops |
 | `requests` | OpenWeatherMap + HERE API calls |
-| `here` (REST) | Traffic-flow tiles + point-to-point routing (free tier) |
+| `here` (REST) | Traffic-flow tiles for the ranking signal (free tier) |
+| Google Maps | Navigation via deep link (owns routing, closures, rerouting) — no SDK/key needed |
 | `redis` | Weather (15-min TTL) + traffic (2–5 min TTL) context cache |
 | `scikit-learn` | Train/test split, metrics |
 
