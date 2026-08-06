@@ -1,0 +1,21 @@
+# Docs
+doc/
+
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Model artifacts & datasets (build outputs)
+parking-engine/data/processed/*.parquet
+parking-engine/data/processed/*.txt
+parking-engine/models/trained/*.parquet
+parking-engine/models/trained/*.txt
+
+# Secrets
+*.env
+.env
