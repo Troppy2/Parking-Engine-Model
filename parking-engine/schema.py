@@ -31,19 +31,23 @@ CATEGORICAL_FEATURES = ["preferred_spot_type", "spot_type"]
 
 # Stable integer encodings so training and serving agree.
 SPOT_TYPES = {"ramp": 0, "surface": 1, "street": 2}
-WEATHER_CONDITIONS = {"clear": 0, "clouds": 1, "rain": 2, "snow": 3,
-                      "thunderstorm": 4, "extreme": 5}
 
 # TomTom Traffic Incident Details "iconCategory" codes -> a stable bucket name.
-# Same idea as WEATHER_CONDITIONS: the model/backend only ever sees the int on
-# the left; the frontend can key off the same int to pick an icon/color without
-# needing to know anything about TomTom's wire format.
+# These ints ARE TomTom's own enum, so the adapter uses the wire value directly.
+# The model/backend only ever sees the int; the frontend keys off the same int
+# to pick an icon/color without needing to know TomTom's wire format.
+# (Weather hazards — fog, ice, flooding — arrive here as incident categories.
+# There is no separate weather vendor; see doc/PARKING_ENGINE.md.)
 TRAFFIC_INCIDENT_CATEGORIES = {
     "unknown": 0, "accident": 1, "fog": 2, "dangerous_conditions": 3,
     "rain": 4, "ice": 5, "jam": 6, "lane_closed": 7, "road_closed": 8,
     "road_works": 9, "wind": 10, "flooding": 11, "detour": 12,
     "cluster": 13, "broken_down_vehicle": 14,
 }
+
+# TomTom sends iconCategory as an INT on the wire, so the adapter needs the
+# reverse direction to attach a human label. Derived, never hand-maintained.
+TRAFFIC_INCIDENT_LABELS = {v: k for k, v in TRAFFIC_INCIDENT_CATEGORIES.items()}
 
 # TomTom "magnitudeOfDelay" -> our 0-3 congestion severity + a suggested
 # frontend color, same pairing as the `ty` table in TomTom's dashboard example.

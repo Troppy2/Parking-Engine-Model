@@ -9,6 +9,10 @@ __pycache__/
 *.pyo
 .venv/
 *.egg-info/
+.pytest_cache/
+
+# Local Redis snapshot
+dump.rdb
 
 # Model artifacts & datasets (build outputs)
 parking-engine/data/processed/*.parquet

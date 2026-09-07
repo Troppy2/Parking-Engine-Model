@@ -1,246 +1,139 @@
 # Park & Go — ML Parking Engine (V3)
 
-## Problem
+A LightGBM ranker that orders candidate parking spots for **this user, right now**, using
+live traffic context. Replaces the V2 static 75-point heuristic, which stays as a fallback.
 
-The V2 recommendation engine uses a static 75-point heuristic. It can recommend a cheap lot that:
-- Has heavy traffic in the surrounding streets
-- Is next to an active sporting event or state fair
-- Requires a long walk in a thunderstorm or blizzard
-- Is the "closest" option but blocked by construction or congestion
-
-A student trusts the app to get them there efficiently. A bad recommendation wastes money (city parking, rideshare), time (traffic, long walk), and comfort (standing in the cold/rain). The ML engine fixes this by making the scorer **context-aware**.
-
----
-
-## What the Engine Does
-
-Given a user and a set of candidate parking spots, the engine:
-
-1. Fetches live context — current weather conditions and active campus events
-2. Builds a feature vector for every `(user, spot, context)` triplet
-3. Runs a trained LightGBM ranker to score each triplet
-4. Returns spots ranked best → worst for **this user, right now**
-
-The heuristic model remains as a fallback if the ML model is not loaded or the user has no history.
+> **Full design and rationale:** [`doc/PARKING_ENGINE.md`](../doc/PARKING_ENGINE.md).
+> **Phase-by-phase build guide:** [`doc/PHASE_GUIDE.md`](../doc/PHASE_GUIDE.md).
+> **Workbook for writing Phases 3–5 yourself:** [`doc/LEARNING_TRACK.md`](../doc/LEARNING_TRACK.md).
+> This file is the operational README — what exists, how to run it. The design docs are the
+> single source of truth for *why*; keep them, not this file, when the two disagree.
 
 ---
 
-## Feature Vector
+## Status
 
-Each row fed to the model describes one user-spot pairing at a point in time.
-
-### User Features
-| Feature | Description |
-|---|---|
-| `cost_sensitivity` | How much the user weights price (from profile preferences) |
-| `max_walk_minutes` | Self-reported max acceptable walk time |
-| `preferred_spot_type` | Ramp, surface lot, street — encoded as integer |
-| `home_lat / home_lon` | Approximate origin for commute distance |
-
-### Spot Features
-| Feature | Description |
-|---|---|
-| `base_cost` | Daily/hourly rate |
-| `walk_time_minutes` | Walk time to nearest campus building |
-| `spot_type` | Ramp, surface, street |
-| `is_verified` | Community-verified flag |
-| `historical_congestion` | Avg congestion score around spot (0–1) |
-
-### Weather Context
-Sourced from OpenWeatherMap current conditions API, cached in Redis every 15 minutes.
-
-| Feature | Description |
-|---|---|
-| `temp_f` | Current temperature in Fahrenheit |
-| `precip_intensity` | Precipitation rate mm/hr (rain or snow) |
-| `wind_speed_mph` | Wind speed |
-| `weather_severity` | Derived score 0–3: 0=clear, 1=light precip, 2=heavy precip, 3=severe (thunderstorm/blizzard) |
-| `condition_code` | OWM condition ID bucket: clear / clouds / rain / snow / thunderstorm / extreme |
-
-### Event Context
-Sourced from the `campus_events` table (already synced via iCal).
-
-| Feature | Description |
-|---|---|
-| `events_near_spot` | Count of active events within 0.5 mi of the spot |
-| `event_on_commute` | Boolean — is there a high-attendance event along the user's route |
-| `nearest_event_distance_mi` | Distance in miles from spot to nearest active event |
-| `event_max_attendance` | Estimated attendance of nearest event (proxy for congestion impact) |
-
-### Traffic Context
-Sourced from a live traffic-flow provider (HERE), cached in Redis every 2–5 minutes. At rank time the
-engine reads **areal flow tiles** around each spot — one cheap lookup per spot cluster, *not* a
-point-to-point routing call per spot. These signals exist only to **improve the recommendation** (a
-spot behind gridlock ranks lower); the drive itself — routing, closures, live rerouting — is handed
-off to Google Maps (see **Navigation Hand-off** below), so the engine never computes a route.
-
-| Feature | Description |
-|---|---|
-| `live_congestion` | Live road congestion around the spot area (0–1), from flow tiles. Complements `historical_congestion` — historical baseline vs. right-now conditions |
-| `traffic_delay_minutes` | Estimated added minutes vs. free-flow travel, derived from the flow tiles along the approximate approach |
-
-### Temporal Features
-| Feature | Description |
-|---|---|
-| `hour_of_day` | 0–23 |
-| `day_of_week` | 0=Monday … 6=Sunday |
-| `semester_week` | Week number within the UMN semester (1–16) |
-| `is_finals_week` | Boolean |
+| Phase | What | State |
+|---|---|---|
+| 0 | `schema.py` — feature contract | ✅ done |
+| 1 | `context/traffic.py` — TomTom adapter | ✅ done, 15 tests |
+| 2 | `data/synthetic_generator.py` | ⚠️ generator done; `main()` + parquet still to write |
+| 3 | `feature_store.py`, `ranker.py`, `training/train.py` | ⬜ stubs |
+| 4 | `engine.py` — serving + fallback | ⬜ stub |
+| 5 | Google Maps navigation deep link | ⬜ not started |
 
 ---
 
-## Model
+## Running it
 
-**Algorithm:** LightGBM with `lambdarank` objective
+Everything must be run **from inside `parking-engine/`** — modules do `from schema import ...`,
+and the parent directory has a hyphen in its name, so it can't be a Python package.
 
-**Why LambdaRank:**
-- The task is ranking, not classification or regression, we want the best spot at the top, not an absolute score
-- LambdaRank optimizes for NDCG (order quality) directly
-- Handles mixed numerical/categorical features with no preprocessing pipeline
-- Fast inference — sub-millisecond per request
+```bash
+cd parking-engine
+python -c "from schema import FEATURE_COLUMNS; print(len(FEATURE_COLUMNS))"   # -> 14
+python -m pytest tests/ -q                                                    # -> 27 passed
+python -m data.synthetic_generator                                            # writes the parquet (Phase 2)
+python -m training.train                                                      # trains the ranker (Phase 3)
+```
 
-**Training signal:** `parking_history` table — when a user selects a spot in a given context, that is the positive label. Spots shown but not selected are implicit negatives.
+**Use `-m`, not a file path.** `python data/synthetic_generator.py` puts `data/` on `sys.path`
+instead of `parking-engine/`, so `from schema import ...` raises `ModuleNotFoundError`. `-m` puts
+the current directory on the path, which is what these top-level imports need. Same applies to
+`training/train.py`.
 
-**Cold start:** New users with no history get the heuristic scores until enough selections accumulate.
+Tests need no API keys and make no network calls — TomTom and Redis are both faked.
 
----
+### Environment
 
-## Training Data (Synthetic Bootstrap)
+Copy `.env.example` to `.env` and fill in:
 
-Because `parking_history` was lost, the model is bootstrapped with synthetic data generated by `data/synthetic_generator.py`. The generator creates realistic scenarios with wide variance:
-
-| Scenario | Behavior encoded |
+| Var | Notes |
 |---|---|
-| Rainy/snowy day | Users prefer closer spots, tolerate higher cost |
-| Thunderstorm | Users heavily penalize distant/exposed surface lots |
-| Active sporting event nearby | Users avoid spots adjacent to event venue |
-| State Fair / large event on commute | Users prefer spots that avoid the event corridor |
-| Clear day, low traffic | Cost becomes dominant factor again |
-| Rush-hour / incident congestion | Users avoid spots whose approach roads are heavily congested, especially when time-pressed |
-| Finals week (high stress) | Users prefer fastest route, cost secondary |
-| Early morning (no events, light traffic) | Users optimize for cost |
+| `TOMTOM_API_KEY` | Free tier at developer.tomtom.com. **Name must match exactly** — a typo fails soft and silently serves clear-road defaults. |
+| `REDIS_URL` | Defaults to `redis://localhost:6379/0` if unset. |
 
-Each synthetic row has realistic noise so the model does not overfit to clean patterns.
+Nothing calls `load_dotenv()` yet — see [`TODO.md`](../TODO.md).
 
 ---
 
-## Navigation Hand-off
+## The feature contract
 
-The engine's job ends at the **decision** — *which spot*. The drive itself is delegated to **Google
-Maps** via a deep link. This is a deliberate scoping choice:
+`schema.py` is the single source of truth. All 14 columns, in order, are what the model sees —
+`FEATURE_COLUMNS` order is load-bearing because LightGBM receives a matrix, not names.
 
-- **Don't reimplement Google.** Live traffic routing, construction/closure avoidance, and off-course
-  rerouting are exactly what Google Maps does with a decade-plus head start. A student far enough out
-  to care about rerouting is opening Google Maps anyway. Competing there is a losing battle.
-- **It deletes a maintenance class we don't want.** No MnDOT ingestion, no "is this closure still
-  active?" validation, no construction cache — Google owns all of it, always fresh.
+| Group | Features |
+|---|---|
+| User | `cost_sensitivity`, `max_walk_minutes`, `preferred_spot_type` |
+| Spot | `base_cost`, `walk_time_minutes`, `spot_type`, `is_verified`, `historical_congestion` |
+| Traffic (TomTom) | `live_congestion`, `traffic_delay_minutes` |
+| Temporal | `hour_of_day`, `day_of_week`, `semester_week`, `is_finals_week` |
 
-On spot selection the app opens a Google Maps directions URL to the spot (ideally the lot's *entrance*
-coordinate). Google produces a route that already accounts for live traffic and closures and reroutes
-the user if they go off course. Park & Go contributes the *choice*; Google executes the *drive*.
+Label is `selected` (0/1); ranking group is `session_id`.
 
-**Where the traffic features fit:** `live_congestion` / `traffic_delay_minutes` stay, but only to
-*rank* spots — they make a congested spot a worse recommendation. They do **not** drive routing.
+**One vendor.** TomTom covers congestion, delay, and weather-related hazards (fog, ice,
+flooding arrive as incident categories). There is no OpenWeatherMap or events integration —
+those were cut when the design consolidated to TomTom.
 
-> **If you ever outgrow the hand-off:** the natural next step is *last-mile* guidance to the exact lot
-> entrance Google doesn't know is the target — an additive, deterministic feature, deliberately out of
-> scope now.
+### Two things that will bite you
 
----
+**TomTom has no `jamFactor` field.** That's HERE's API. Congestion is derived from
+`currentSpeed` vs `freeFlowSpeed`; delay from `currentTravelTime - freeFlowTravelTime`.
 
-## Build Phases
+**`iconCategory` arrives as an int**, and `TRAFFIC_INCIDENT_CATEGORIES`' values *are* TomTom's
+enum. Use the wire value directly; use `TRAFFIC_INCIDENT_LABELS` for the reverse lookup.
 
-### Phase 1 — Context Layer
-**Goal:** Live weather and event data available to the recommendation path.
+### Temporal features & semester calendar
 
-- `context/weather.py` — OpenWeatherMap `/weather` endpoint, maps OWM condition codes to severity buckets, caches result in Redis with 15-min TTL
-- `context/events.py` — Queries `campus_events` table for currently active events, computes distance from each spot, checks overlap with user commute corridor
-- `context/traffic.py` — HERE traffic-flow tiles around each spot, returns `live_congestion` + `traffic_delay_minutes` (ranking signals only), caches result in Redis with 2–5 min TTL, fail-soft to a clear-roads default
-- APScheduler job in `task/` refreshes weather every 15 minutes
+`semester_week` and `is_finals_week` come from a campus calendar with **two rules**:
 
-**Deliverable:** `get_weather_context(lat, lon)`, `get_event_context(spot, user_origin)`, and `get_traffic_context(spot)` ready to use.
+- **Fall** always begins on the **1st Tuesday of September**.
+- **Spring** always begins the **Monday after MLK Day** (3rd Monday of January).
 
-### Phase 2 — Synthetic Training Data
-**Goal:** Enough labeled data to train the initial ranker.
+There is **no summer-session rule** and no inter-semester bridge — winter break, spring
+break, and the May–August summer window are intentionally unsupported. During those
+periods `temporal_features_now()` returns a neutral fallback (`semester_week=1`,
+`is_finals_week=0`) so the model is never fed an out-of-distribution value. Expect
+reduced ranking quality outside the fall and spring windows; that is by design, not a
+bug.
 
-- `data/synthetic_generator.py` — generates N parking_history rows covering all scenario types above
-- Data is written to `data/processed/training_data.parquet`
-- Targets wide variance across weather, event, temporal, and user preference dimensions
-
-**Deliverable:** `training_data.parquet` with ~50k rows across diverse contexts.
-
-### Phase 3 — Feature Engineering + Model
-**Goal:** Trained model artifact ready for inference.
-
-- `data/feature_store.py` — assembles flat feature vector from user prefs, spot attributes, weather context, and event context
-- `models/ranker.py` — LightGBM wrapper with `fit()`, `predict()`, `save()`, `load()` methods
-- `training/train.py` — loads parquet, builds feature matrix, trains ranker, saves to `models/trained/ranker.txt`
-
-**Deliverable:** `models/trained/ranker.txt` that scores `(user, spot, context)` triplets.
-
-### Phase 4 — Integration
-**Goal:** `/api/recommendations` uses the ML engine instead of the heuristic.
-
-- `engine.py` — public interface: accepts user + list of candidate spots, fetches context, builds features, returns ranked list with scores
-- Modify `services/recommendation_service.py` to call `engine.py` first; fall back to heuristic if model not loaded
-- Add `/api/ml/retrain` admin endpoint to trigger retraining when real history accumulates
-
-**Deliverable:** ML-powered recommendations in the live app, heuristic still available as fallback.
-
-### Phase 5 — Navigation Hand-off
-**Goal:** Get the user driving to the chosen spot with a traffic- and closure-aware route — by handing
-off to Google Maps, not by building routing ourselves.
-
-- `engine.py` (or a small helper) — `navigation_url(spot)` builds a Google Maps directions deep link to the spot's entrance coordinate
-- Google Maps owns the route, live traffic, construction/closure avoidance, and off-course rerouting
-- No MnDOT ingestion, no closure cache, no routing/rerouting logic in the app
-
-**Deliverable:** selecting a recommended spot opens Google Maps to that spot's entrance with driving
-directions; the app ships zero routing logic of its own.
+If your campus uses different rules (e.g. quarter system, summer session), edit
+`_first_tuesday_of_september` and `_week_after_mlk` in `data/feature_store.py` — they
+are the only two calendar functions in the project.
 
 ---
 
-## Folder Structure
+## Layout
 
 ```
 parking-engine/
-├── context/
-│   ├── weather.py           # OpenWeatherMap client + severity mapping
-│   ├── events.py            # Event proximity + commute overlap
-│   └── traffic.py           # HERE flow tiles (ranking signal only)
+├── context/traffic.py          # TomTom Flow + Incidents; cached, fail-soft, never raises
 ├── data/
 │   ├── synthetic_generator.py  # Generates training_data.parquet
-│   └── feature_store.py        # Builds feature vectors for model input
+│   ├── feature_store.py        # Feature vectors — shared by train AND serve (anti-skew)
+│   └── processed/              # Build output (gitignored)
 ├── models/
-│   ├── ranker.py            # LightGBM ranker wrapper
-│   └── trained/             # Serialized model artifacts (.txt)
-├── training/
-│   └── train.py             # Training pipeline
-└── engine.py                # Public interface + Google Maps navigation deep link
+│   ├── ranker.py               # LightGBM wrapper
+│   └── trained/                # Model artifacts (gitignored)
+├── training/train.py           # Training pipeline
+├── tests/                      # No network, no API keys
+├── schema.py                   # FEATURE_COLUMNS, encodings, TomTom lookup tables
+└── engine.py                   # Public interface + Google Maps deep link
 ```
 
 ---
 
-## External Dependencies
+## Non-negotiables
 
-| Dependency | Purpose |
-|---|---|
-| `lightgbm` | Gradient boosted ranker |
-| `pandas` | Feature matrix assembly |
-| `numpy` | Numerical ops |
-| `requests` | OpenWeatherMap + HERE API calls |
-| `here` (REST) | Traffic-flow tiles for the ranking signal (free tier) |
-| Google Maps | Navigation via deep link (owns routing, closures, rerouting) — no SDK/key needed |
-| `redis` | Weather (15-min TTL) + traffic (2–5 min TTL) context cache |
-| `scikit-learn` | Train/test split, metrics |
+These are the rules that keep the system honest. Breaking one fails *silently*.
 
----
-
-## Future Extensions
-
-| Extension | Notes |
-|---|---|
-| Online retraining | Retrain nightly on accumulated `parking_history` via APScheduler job |
-| User feedback signal | Explicit thumbs-up/down on recommendations → stronger training signal than implicit clicks |
-| A/B testing | Shadow-run ML alongside heuristic, log which one the user would have preferred |
-| Separate repo | Extract to standalone Python package once model API stabilizes |
+1. **Train and serve build features with the same function** (`feature_store.py`), ending in
+   `df[FEATURE_COLUMNS]`. This is the anti-skew keystone.
+2. **`context/traffic.py` never raises.** A dead TomTom or a dead Redis degrades to
+   clear-road defaults; it does not propagate into the request path.
+3. **Split by group, never by row.** Rows from one `session_id` must not straddle train/val.
+4. **Rows must be sorted by `session_id`** before computing LightGBM `group` sizes.
+5. **Always beat the heuristic baseline** on the same validation sessions. "It works" is not
+   a result; "it beats the heuristic by X NDCG" is.
+6. **Ship the fallback and test the failure path on purpose.** A feature that can crash
+   `/api/recommendations` is worse than no feature.
